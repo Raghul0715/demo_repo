@@ -1,13 +1,13 @@
-name: Build ADF artifact and publish to JFrog
+name: Package single ADF pipeline -> JFrog (test)
 
 on:
+  workflow_dispatch:   # manual test run on this branch
   push:
     branches:
-      - adf_publish
+      - adf_publish     # once merged to main/default this will run when ADF publishes
 
 jobs:
-  build_and_publish_adf:
-    name: Package and upload ADF artifact
+  package_single_pipeline:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -15,68 +15,56 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Ensure adf_publish exists (debug)
-        run: |
-          echo "Listing adf_publish"
-          ls -la adf_publish || true
+      - name: Show repo root (debug)
+        run: ls -la
 
-      - name: Detect factory folder
-        id: detect
+      - name: Verify pipeline file exists
+        id: check
         run: |
-          # pick the first folder under adf_publish (adjust selection if multiple)
-          FACTORY_DIR=$(ls -1 adf_publish | head -n1)
-          if [ -z "$FACTORY_DIR" ]; then
-            echo "No factory folder found under adf_publish" >&2
+          PIPE_PATH="pipeline/Migration_CRM_Sync_Procedure.json"
+          echo "Checking for $PIPE_PATH"
+          if [ ! -f "$PIPE_PATH" ]; then
+            echo "::error file=$PIPE_PATH::Pipeline file not found. Aborting."
             exit 1
           fi
-          echo "Detected FACTORY_DIR=$FACTORY_DIR"
-          echo "FACTORY_DIR=$FACTORY_DIR" >> $GITHUB_OUTPUT
+          echo "found=1" >> $GITHUB_OUTPUT
+          echo "PIPE_PATH=$PIPE_PATH" >> $GITHUB_OUTPUT
 
-      - name: Create zip of factory folder
+      - name: Create ZIP containing only the pipeline file
+        if: steps.check.outputs.found == '1'
+        id: makezip
         run: |
           mkdir -p build
-          ZIPNAME="adf_${{ steps.detect.outputs.FACTORY_DIR }}_${{ github.run_number }}.zip"
-          echo "Zipping adf_publish/${{ steps.detect.outputs.FACTORY_DIR }} -> build/$ZIPNAME"
-          zip -r "build/$ZIPNAME" "adf_publish/${{ steps.detect.outputs.FACTORY_DIR }}" >/dev/null
+          ZIPNAME="pipeline_Migration_CRM_Sync_${{ github.run_number }}.zip"
+          PIPE="${{ steps.check.outputs.PIPE_PATH }}"
+          echo "Creating build/$ZIPNAME with $PIPE"
+          zip -j "build/$ZIPNAME" "$PIPE" >/dev/null
+          echo "ZIPNAME=$ZIPNAME" >> $GITHUB_OUTPUT
           echo "ZIPPATH=build/$ZIPNAME" >> $GITHUB_OUTPUT
+
+      - name: List build dir for debug
+        run: ls -la build || true
 
       - name: Setup JFrog CLI
         uses: jfrog/setup-jfrog-cli@v2
 
-      - name: Configure JFrog CLI with API key
+      - name: Configure JFrog CLI
         env:
           JFROG_URL: ${{ secrets.JFROG_URL }}
           JFROG_API_KEY: ${{ secrets.JFROG_API_KEY }}
         run: |
           jfrog rt config --url="$JFROG_URL" --apikey="$JFROG_API_KEY" --interactive=false
 
-      - name: Upload artifact to JFrog
+      - name: Upload pipeline ZIP to JFrog
         env:
           JFROG_REPO: ${{ secrets.JFROG_REPO }}
         run: |
-          ZIPFILE="${{ steps.detect.outputs.FACTORY_DIR }}_${{ github.run_number }}.zip"
+          ZIPFILE="${{ steps.makezip.outputs.ZIPNAME }}"
           SRC="build/$ZIPFILE"
           DST="${JFROG_REPO}/${ZIPFILE}"
-          echo "Uploading $SRC to $DST"
+          echo "Uploading $SRC -> $DST"
           jfrog rt u "$SRC" "$DST" --flat=true
-          # verify
           jfrog rt s "$DST"
 
-      # Optional: trigger ADO release (uncomment and configure if you want ADO auto-trigger)
-      #- name: Trigger ADO Release (optional)
-      #  if: always()
-      #  env:
-      #    ADO_ORG: ${{ secrets.ADO_ORG }}            # e.g. https://devops.company.local
-      #    ADO_PROJECT: ${{ secrets.ADO_PROJECT }}
-      #    ADO_PAT: ${{ secrets.ADO_TRIGGER_PAT }}
-      #    ADO_RELEASE_DEF_ID: ${{ secrets.ADO_RELEASE_DEF_ID }}
-      #  run: |
-      #    # Basic call to create a release or start a pipeline - adjust per your ADO on-prem REST API
-      #    AUTH=$(echo -n ":$ADO_PAT" | base64)
-      #    echo "Triggering ADO release definition $ADO_RELEASE_DEF_ID"
-      #    curl -s -X POST \
-      #      -H "Authorization: Basic $AUTH" \
-      #      -H "Content-Type: application/json" \
-      #      "$ADO_ORG/$ADO_PROJECT/_apis/release/definitions/$ADO_RELEASE_DEF_ID?api-version=6.0" \
-      #      -d '{}' -o response.json
-      #    cat response.json
+      - name: Output artifact info
+        run: echo "Uploaded to JFrog as: ${{ secrets.JFROG_REPO }}/${{ steps.makezip.outputs.ZIPNAME }}"
