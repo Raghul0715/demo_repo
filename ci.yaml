@@ -1,0 +1,82 @@
+name: Build ADF artifact and publish to JFrog
+
+on:
+  push:
+    branches:
+      - adf_publish
+
+jobs:
+  build_and_publish_adf:
+    name: Package and upload ADF artifact
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure adf_publish exists (debug)
+        run: |
+          echo "Listing adf_publish"
+          ls -la adf_publish || true
+
+      - name: Detect factory folder
+        id: detect
+        run: |
+          # pick the first folder under adf_publish (adjust selection if multiple)
+          FACTORY_DIR=$(ls -1 adf_publish | head -n1)
+          if [ -z "$FACTORY_DIR" ]; then
+            echo "No factory folder found under adf_publish" >&2
+            exit 1
+          fi
+          echo "Detected FACTORY_DIR=$FACTORY_DIR"
+          echo "FACTORY_DIR=$FACTORY_DIR" >> $GITHUB_OUTPUT
+
+      - name: Create zip of factory folder
+        run: |
+          mkdir -p build
+          ZIPNAME="adf_${{ steps.detect.outputs.FACTORY_DIR }}_${{ github.run_number }}.zip"
+          echo "Zipping adf_publish/${{ steps.detect.outputs.FACTORY_DIR }} -> build/$ZIPNAME"
+          zip -r "build/$ZIPNAME" "adf_publish/${{ steps.detect.outputs.FACTORY_DIR }}" >/dev/null
+          echo "ZIPPATH=build/$ZIPNAME" >> $GITHUB_OUTPUT
+
+      - name: Setup JFrog CLI
+        uses: jfrog/setup-jfrog-cli@v2
+
+      - name: Configure JFrog CLI with API key
+        env:
+          JFROG_URL: ${{ secrets.JFROG_URL }}
+          JFROG_API_KEY: ${{ secrets.JFROG_API_KEY }}
+        run: |
+          jfrog rt config --url="$JFROG_URL" --apikey="$JFROG_API_KEY" --interactive=false
+
+      - name: Upload artifact to JFrog
+        env:
+          JFROG_REPO: ${{ secrets.JFROG_REPO }}
+        run: |
+          ZIPFILE="${{ steps.detect.outputs.FACTORY_DIR }}_${{ github.run_number }}.zip"
+          SRC="build/$ZIPFILE"
+          DST="${JFROG_REPO}/${ZIPFILE}"
+          echo "Uploading $SRC to $DST"
+          jfrog rt u "$SRC" "$DST" --flat=true
+          # verify
+          jfrog rt s "$DST"
+
+      # Optional: trigger ADO release (uncomment and configure if you want ADO auto-trigger)
+      #- name: Trigger ADO Release (optional)
+      #  if: always()
+      #  env:
+      #    ADO_ORG: ${{ secrets.ADO_ORG }}            # e.g. https://devops.company.local
+      #    ADO_PROJECT: ${{ secrets.ADO_PROJECT }}
+      #    ADO_PAT: ${{ secrets.ADO_TRIGGER_PAT }}
+      #    ADO_RELEASE_DEF_ID: ${{ secrets.ADO_RELEASE_DEF_ID }}
+      #  run: |
+      #    # Basic call to create a release or start a pipeline - adjust per your ADO on-prem REST API
+      #    AUTH=$(echo -n ":$ADO_PAT" | base64)
+      #    echo "Triggering ADO release definition $ADO_RELEASE_DEF_ID"
+      #    curl -s -X POST \
+      #      -H "Authorization: Basic $AUTH" \
+      #      -H "Content-Type: application/json" \
+      #      "$ADO_ORG/$ADO_PROJECT/_apis/release/definitions/$ADO_RELEASE_DEF_ID?api-version=6.0" \
+      #      -d '{}' -o response.json
+      #    cat response.json
