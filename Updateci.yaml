@@ -89,3 +89,23 @@ jobs:
         if: steps.check.outputs.found == '1'
         run: pwsh -NoProfile -Command "Write-Host 'Artifact:' (Join-Path 'build' '${{ steps.makezip.outputs.ZIPNAME }}')"
         shell: pwsh
+
+
+- name: Verify pipeline file exists
+  id: check
+  shell: pwsh
+  run: |
+    $pipe = "pipeline/CRM_Sync_ProcedureCode.json"
+    Write-Host "Checking for pipeline: $pipe"
+    
+    if (Test-Path -Path $pipe) {
+        "found=1"        | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        "PIPE_PATH=$pipe"| Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        Write-Host "Pipeline file found"
+    }
+    else {
+        "found=0"        | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        "PIPE_PATH="     | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        Write-Host "Pipeline file not found - skipping remaining steps"
+        exit 0
+    }
