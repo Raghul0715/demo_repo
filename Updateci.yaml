@@ -1,0 +1,91 @@
+name: Package single ADF pipeline -> JFrog (Windows runner)
+
+on:
+  push:
+    branches:
+      - adf_publish
+
+jobs:
+  package_single_pipeline:
+    # target your self-hosted Windows runner labels
+    runs-on:
+      - self-hosted
+      - caresource-windows-default
+      - bld06
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show repo root (debug)
+        run: pwsh -NoProfile -Command "Get-ChildItem -Force -Name | Sort-Object"
+      
+      - name: Verify pipeline file exists
+        id: check
+        run: |
+          $pipe = 'pipeline/CRM_sync_Procedure.json'
+          Write-Host "Checking for pipeline: $pipe"
+          if (Test-Path -Path $pipe) {
+            "`"found=1`"" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            "`"PIPE_PATH=$pipe`"" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Host "Found: $pipe"
+          } else {
+            "`"found=0`"" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            "`"PIPE_PATH=``"" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Host "Pipeline file not found - skipping remaining steps"
+            Exit 0
+          }
+        shell: pwsh
+
+      - name: Create ZIP containing only the pipeline file (Windows)
+        if: steps.check.outputs.found == '1'
+        id: makezip
+        run: |
+          $zip = "pipeline_CRM_sync_$env:GITHUB_RUN_NUMBER.zip"
+          $pipe = "${{ steps.check.outputs.PIPE_PATH }}"
+          New-Item -ItemType Directory -Path build -Force | Out-Null
+          Write-Host "Creating ZIP $zip containing $pipe"
+          if (-Not (Test-Path -Path $pipe)) { Write-Error "Pipeline file not found: $pipe"; exit 1 }
+          Compress-Archive -Path $pipe -DestinationPath (Join-Path 'build' $zip) -Force
+          "`"ZIPNAME=$zip`"" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "`"ZIPPATH=build/$zip`"" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Created: build\$zip"
+        shell: pwsh
+
+      - name: List build dir for debug
+        if: steps.check.outputs.found == '1'
+        run: pwsh -NoProfile -Command "Get-ChildItem -Path build -Force | Format-Table -AutoSize"
+        shell: pwsh
+
+      - name: Setup JFrog CLI
+        id: setup-jfrog-cli
+        uses: jfrog/setup-jfrog-cli@v4
+        with:
+          # keep these values if your config uses OIDC; otherwise remove/adjust
+          jfrog-cli-version: latest
+        env:
+          JF_URL: ${{ secrets.JFROG_URL }}       # e.g. https://your.jfrog.io
+          JF_OIDC_NAME: ${{ secrets.JFROG_GH_OIDC_NAME }}
+
+      - name: Upload pipeline ZIP to JFrog
+        if: steps.check.outputs.found == '1'
+        env:
+          JF_ACCESS_TOKEN: ${{ steps.setup-jfrog-cli.outputs.oidc-access-token }}
+          JFROG_REPO: ${{ secrets.JFROG_REPO }}   # e.g. my-repo/path
+        run: |
+          $zip = "${{ steps.makezip.outputs.ZIPNAME }}"
+          $src = Join-Path "build" $zip
+          if (-Not (Test-Path -Path $src)) { Write-Error "ZIP not found: $src"; exit 1 }
+          $dst = "${{ secrets.JFROG_REPO }}/$zip"
+          Write-Host "Uploading $src -> $dst"
+          # jfrog CLI should be available after setup step
+          jfrog rt u $src $dst --flat=true
+          Write-Host "Upload complete"
+        shell: pwsh
+
+      - name: Output artifact info
+        if: steps.check.outputs.found == '1'
+        run: pwsh -NoProfile -Command "Write-Host 'Artifact:' (Join-Path 'build' '${{ steps.makezip.outputs.ZIPNAME }}')"
+        shell: pwsh
