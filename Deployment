@@ -1,0 +1,20 @@
+$pipelineFile = "$(System.DefaultWorkingDirectory)/extracted/CRM_Sync_ProcedureCode.json"
+$pipelineName = "CRM_Sync_ProcedureCode"
+$factoryName = "$(ADF_FACTORY_NAME)"
+$resourceGroup = "$(ADF_RG)"
+$subscriptionId = "$(SUBSCRIPTION_ID)"
+
+# Login to Azure using service connection
+Write-Host "Logging into Azure..."
+az login --service-principal `
+  --username $(azureServicePrincipal.clientId) `
+  --password $(azureServicePrincipal.clientSecret) `
+  --tenant $(azureServicePrincipal.tenantId)
+
+# Deploy pipeline
+Write-Host "Deploying ADF pipeline..."
+az rest --method put `
+  --uri "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.DataFactory/factories/$factoryName/pipelines/$pipelineName?api-version=2018-06-01" `
+  --body @$pipelineFile
+
+Write-Host "Pipeline deployment completed."
