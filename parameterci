@@ -1,4 +1,4 @@
-name: Package selected ADF assets -> JFrog (parametrized)
+name: Package selected ADF assets -> JFrog (parameterized, Windows)
 
 on:
   workflow_dispatch:
@@ -6,125 +6,169 @@ on:
       artifact_basename:
         description: 'Artifact base name (used to name ZIP). e.g. D365-CustomerCare-ADF'
         required: true
-        default: 'adf-artifact'
+        default: 'D365-CustomerCare-ADF'
       pipeline_file:
-        description: 'Path in repo to pipeline file (relative). e.g. pipeline/CRM_Sync_ProcedureCode.json'
+        description: 'Repo relative path to pipeline (e.g. pipeline/CRM_Sync_ProcedureCode.json). Leave empty to skip.'
         required: false
         default: ''
       dataset_file:
-        description: 'Path in repo to dataset file (relative). e.g. dataset/DS_SomeDataset.json'
+        description: 'Repo relative path to dataset (e.g. dataset/DS_SomeDataset.json). Leave empty to skip.'
         required: false
         default: ''
       linkedservice_file:
-        description: 'Path in repo to linkedService file (relative). e.g. linkedService/LS_Sql.json'
+        description: 'Repo relative path to linkedService (e.g. linkedService/LS_Sql.json). Leave empty to skip.'
         required: false
         default: ''
       dataflow_file:
-        description: 'Path in repo to dataflow file (relative). e.g. dataflow/DF_Transform.json'
+        description: 'Repo relative path to dataflow (e.g. dataflow/DF_Transform.json). Leave empty to skip.'
         required: false
         default: ''
 
+# Keep the same env variable names/format you used in your working yml
+env:
+  PkgBase: "D365-CustomerCare-ADF"
+  ArtifactoryRepoName: "workflow-zip-D365-np-deploy"
+  ArtifactReleaseDir: "${{ github.workspace }}\\ReleasePackages"
+  Art_PE_URL: "https://caresource.pe.jfrog.io"
+  JFROG_CLI_HOME_DIR: "${{ github.workspace }}\\jfrog"
+
 jobs:
   build_and_package:
-    runs-on: ubuntu-latest
+    # windows runner same as your original workflows
+    runs-on:
+      group: caresource-windows-default
+      labels: bld06
+
+    outputs:
+      zipname: ${{ steps.makezip.outputs.zipname }}
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repository (full)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Show repo root (debug)
-        run: ls -la
-
-      - name: Prepare working folders
+      - name: Prepare workspace (Windows)
         run: |
-          set -e
-          mkdir -p ReleasePackages
-          mkdir -p package_work/pipeline package_work/dataset package_work/linkedService package_work/dataflow
+          if (Test-Path -Path "${{ env.ArtifactReleaseDir }}" ) { Remove-Item -Recurse -Force "${{ env.ArtifactReleaseDir }}" }
+          New-Item -ItemType Directory -Force -Path "${{ env.ArtifactReleaseDir }}" | Out-Null
+          if (Test-Path -Path "${{ github.workspace }}\package_work") { Remove-Item -Recurse -Force "${{ github.workspace }}\package_work" }
+        shell: pwsh
 
-      - name: Copy selected ADF assets into package folder
-        id: copy_assets
+      - name: Copy user-selected files into package structure
+        id: copy
         run: |
-          set -e
+          $base = "${{ github.workspace }}\package_work"
+          $found=0
 
-          # helper function
-          copy_if_provided() {
-            SRC="$1"
-            DST_DIR="$2"
-            if [ -n "$SRC" ]; then
-              if [ -f "$SRC" ]; then
-                echo "Copying $SRC -> $DST_DIR/"
-                cp "$SRC" "$DST_DIR/"
-                echo "found=1" >> $GITHUB_OUTPUT
-              else
-                echo "File not found in repo: $SRC (skipping)"
-              fi
-            else
-              echo "No input provided for $DST_DIR (skipping)"
-            fi
+          function Copy-IfProvided([string]$inputVar, [string]$targetDir) {
+            if ($inputVar -and $inputVar.Trim() -ne "") {
+              $src = Join-Path -Path "${{ github.workspace }}" -ChildPath $inputVar
+              if (Test-Path -Path $src -PathType Leaf) {
+                Write-Host "Creating folder: $targetDir"
+                New-Item -ItemType Directory -Force -Path (Join-Path $base $targetDir) | Out-Null
+                Copy-Item -Path $src -Destination (Join-Path $base $targetDir) -Force
+                Write-Host "Copied: $src -> $($base)\$targetDir"
+                $script:found = 1
+              } else {
+                Write-Host "File not found in repo (skipping): $src"
+              }
+            } else {
+              Write-Host "No input specified for $targetDir - skipping"
+            }
           }
 
-          # Inputs
-          echo "Inputs:"
-          echo " pipeline_file: ${{ github.event.inputs.pipeline_file }}"
-          echo " dataset_file: ${{ github.event.inputs.dataset_file }}"
-          echo " linkedservice_file: ${{ github.event.inputs.linkedservice_file }}"
-          echo " dataflow_file: ${{ github.event.inputs.dataflow_file }}"
+          # Inputs from the workflow_dispatch
+          $pipeline_in = '${{ github.event.inputs.pipeline_file }}'
+          $dataset_in = '${{ github.event.inputs.dataset_file }}'
+          $linked_in  = '${{ github.event.inputs.linkedservice_file }}'
+          $dataflow_in = '${{ github.event.inputs.dataflow_file }}'
 
-          # Copy files (paths are relative to repo root)
-          copy_if_provided "${{ github.event.inputs.pipeline_file }}" package_work/pipeline
-          copy_if_provided "${{ github.event.inputs.dataset_file }}" package_work/dataset
-          copy_if_provided "${{ github.event.inputs.linkedservice_file }}" package_work/linkedService
-          copy_if_provided "${{ github.event.inputs.dataflow_file }}" package_work/dataflow
+          Copy-IfProvided $pipeline_in 'pipeline'
+          Copy-IfProvided $dataset_in 'dataset'
+          Copy-IfProvided $linked_in  'linkedService'
+          Copy-IfProvided $dataflow_in 'dataflow'
 
-          # list created structure
-          echo "Package structure:"
-          ls -R package_work || true
+          if ($script:found -ne 1) {
+            Write-Host "No files were copied. Will create a placeholder file to avoid empty zip."
+            New-Item -ItemType Directory -Force -Path $base | Out-Null
+            "placeholder" | Out-File -FilePath (Join-Path $base "placeholder.txt") -Encoding utf8
+          }
 
-      - name: Create ZIP artifact
+          Write-Host "Package_work contents:"
+          Get-ChildItem -Recurse -Force "$base" | ForEach-Object { Write-Host $_.FullName }
+
+          # expose a flag output for later if required
+          Echo "::set-output name=copied::$($script:found)"
+
+        shell: pwsh
+
+      - name: Create ZIP package (Windows)
         id: makezip
         run: |
-          set -e
-          ARTNAME="${{ github.event.inputs.artifact_basename }}-${{ github.run_number }}.zip"
-          TARGET="ReleasePackages/${ARTNAME}"
-          echo "Creating ${TARGET} ..."
-          # include only folders that exist and are not empty
-          cd package_work
-          # if package_work is empty create an empty placeholder to avoid zip error
-          if [ -z "$(ls -A .)" ]; then
-            echo "No selected files found to package. Creating empty placeholder file." > placeholder.txt
-          fi
-          zip -r "../${TARGET}" . >/dev/null
-          cd ..
-          echo "artifact=${TARGET}" >> $GITHUB_OUTPUT
-          echo "ARTIFACT_PATH=${TARGET}"
-      - name: List ReleasePackages (debug)
-        run: ls -la ReleasePackages || true
+          $artifactBase = '${{ github.event.inputs.artifact_basename }}'
+          $runNum = $env:GITHUB_RUN_NUMBER
+          $zipname = "${artifactBase}-${runNum}.zip"
+          $releaseDir = "${{ env.ArtifactReleaseDir }}"
+          if (!(Test-Path -Path $releaseDir)) { New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null }
 
-      # --- KEEP YOUR JFROG UPLOAD STEPS (do not change format) ---
-      # The lines below demonstrate typical steps - replace with your current working upload commands/secrets
+          $sourceDir = "${{ github.workspace }}\package_work"
+
+          Write-Host "Creating zip $zipname from $sourceDir -> $releaseDir"
+          # Ensure the compress-archive overwrites if exists
+          $targetPath = Join-Path $releaseDir $zipname
+
+          if (Test-Path $targetPath) { Remove-Item -Force $targetPath }
+
+          # Compress-Archive will error if sourceDir empty; but we ensured placeholder if nothing copied
+          Compress-Archive -Path (Join-Path $sourceDir '*') -DestinationPath $targetPath -Force
+
+          Write-Host "Created $targetPath"
+          Get-ChildItem -Path $releaseDir | ForEach-Object { Write-Host $_.FullName }
+
+          # Set output for other jobs
+          Write-Output "::set-output name=zipname::$zipname"
+        shell: pwsh
+
+  artifactory_upload:
+    needs: build_and_package
+    runs-on:
+      group: caresource-windows-default
+      labels: bld06
+
+    steps:
+      - name: Download build artifact (copy ReleasePackages zip from workspace)
+        run: |
+          $releaseDir = "${{ env.ArtifactReleaseDir }}"
+          Write-Host "ReleasePackages dir: $releaseDir"
+          Get-ChildItem -Path $releaseDir -Filter "${{ needs.build_and_package.outputs.zipname }}" -Recurse | ForEach-Object { Write-Host "Found: $($_.FullName)" }
+        shell: pwsh
+
       - name: Setup JFrog CLI
-        uses: jfrog/setup-jfrog-cli@v4
-        with:
-          version: 'latest'
-        env:
-          # put your jfrog env/secrets here if you use them in your upload
-          JFROG_CLI_OIDC_TOKEN_REQUESTS_URL: ${{ secrets.JFROG_OIDC_URL || '' }}
+        uses: jfrog/setup-jfrog-cli@v4.2.2
 
-      - name: Configure JFrog CLI (example)
-        run: |
-          # Example - configure jfrog CLI with access token
-          # jfrog rt config add <server-id> --url="$JFROG_URL" --access-token="$JFROG_TOKEN" --interactive=false
-          echo "Configure jfrog CLI here (this step should match your existing workflow)"
-
-      - name: Upload artifact to Artifactory (do not modify if you have working steps)
-        run: |
-          # Use the same upload command that you already have and which is working.
-          # Example (replace with your working command):
-          ART="${{ steps.makezip.outputs.artifact }}"
-          echo "Uploading ${ART} to Artifactory (replace this with the real jfrog upload command)"
-          # jf rt u "${ART}" "my-repo/${ART}" --flat=true
+      - name: Configure JFrog CLI (non-interactive token)
         env:
-          # Example secrets (keep your existing secrets)
-          JFROG_TOKEN: ${{ secrets.JFROG_SAAS_TOKEN }}
+          ART_PE_URL: ${{ env.Art_PE_URL }}
+          JFROG_TOKEN: ${{ secrets.JFROG_TOKEN }}
+        run: |
+          # configure jfrog CLI server entry (server id = artifactory-saas)
+          jfrog rt c add artifactory-saas --url="$env:ART_PE_URL" --access-token="$env:JFROG_TOKEN" --interactive=false
+          jfrog rt c show
+        shell: pwsh
+
+      - name: Upload ReleasePackages zip to Artifactory (same format as your working yml)
+        env:
+          BUILD_NAME: "${{ env.PkgBase }}"
+          BUILD_NUMBER: "${{ github.run_number }}"
+          ARTIFACT_RELEASE_DIR: "${{ env.ArtifactReleaseDir }}"
+          ART_REPO_PATH: "${{ env.ArtifactoryRepoName }}"
+        run: |
+          $zip = "${{ needs.build_and_package.outputs.zipname }}"
+          $fullZipPath = Join-Path "${{ env.ArtifactReleaseDir }}" $zip
+          Write-Host "Preparing to upload: $fullZipPath"
+          jf rt upload "$fullZipPath" "${{ env.ArtifactoryRepoName }}/" --flat=true --build-name="$env:BUILD_NAME" --build-number="$env:BUILD_NUMBER" --server-id=artifactory-saas
+          # publish build info (same as your original)
+          jf rt bp "$env:BUILD_NAME" "$env:BUILD_NUMBER" --server-id=artifactory-saas
+          Write-Host "Upload complete. Build published: $env:BUILD_NAME / $env:BUILD_NUMBER"
+        shell: pwsh
