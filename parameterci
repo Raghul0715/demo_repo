@@ -130,45 +130,46 @@ jobs:
           Write-Output "::set-output name=zipname::$zipname"
         shell: pwsh
 
-  artifactory_upload:
-    needs: build_and_package
-    runs-on:
-      group: caresource-windows-default
-      labels: bld06
+  # artifactory_upload job (replace your existing artifactory_upload job with this)
+artifactory_upload:
+  name: Artifactory Upload
+  runs-on: ubuntu-latest            # <-- use Ubuntu for upload step
+  needs: build_and_package
+  env:
+    PkgBase: "${{ env.PkgBase }}"
+    ARTIFACT_BUILD_NUMBER: "${{ needs.build_and_package.outputs.ARTIFACT_BUILD_NUMBER }}"   # if you set this output
+    ArtifactoryRepoName: "${{ env.ArtifactoryRepoName }}"   # repo/path in Artifactory (e.g. workflow-zip-D365-np-deploy)
+    RepoName: "${{ env.RepoName }}"                         # sub-folder/repo name you used earlier
+    ArtifactReleaseDir: "${{ env.ArtifactReleaseDir }}"     # where the build created the zip
+    ArtProjectKey: "${{ env.ArtProjectKey }}"
+    Art_PE_URL: "${{ env.Art_PE_URL }}"
+    JFROG_CLI_HOME_DIR: "${{ env.JFROG_CLI_HOME_DIR }}"
+  steps:
+    - name: Download build artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: build-zip
+        path: ${{ env.ArtifactReleaseDir }}   # download into the same folder path you used in build
 
-    steps:
-      - name: Download build artifact (copy ReleasePackages zip from workspace)
-        run: |
-          $releaseDir = "${{ env.ArtifactReleaseDir }}"
-          Write-Host "ReleasePackages dir: $releaseDir"
-          Get-ChildItem -Path $releaseDir -Filter "${{ needs.build_and_package.outputs.zipname }}" -Recurse | ForEach-Object { Write-Host "Found: $($_.FullName)" }
-        shell: pwsh
+    - name: Setup JFrog CLI
+      uses: jfrog/setup-jfrog-cli@v4.2.2
+      env:
+        JFROG_CLI_HOME_DIR: ${{ env.JFROG_CLI_HOME_DIR }}
 
-      - name: Setup JFrog CLI
-        uses: jfrog/setup-jfrog-cli@v4.2.2
+    - name: Configure JFrog CLI
+      run: |
+        # configure jfrog CLI using access token in secrets
+        jf c add --url="${{ env.Art_PE_URL }}" --access-token="${{ secrets.JF_SAAS_TOKEN }}" --interactive=false artifactory-saas
+        jf c show artifactory-saas
 
-      - name: Configure JFrog CLI (non-interactive token)
-        env:
-          ART_PE_URL: ${{ env.Art_PE_URL }}
-          JFROG_TOKEN: ${{ secrets.JFROG_TOKEN }}
-        run: |
-          # configure jfrog CLI server entry (server id = artifactory-saas)
-          jfrog rt c add artifactory-saas --url="$env:ART_PE_URL" --access-token="$env:JFROG_TOKEN" --interactive=false
-          jfrog rt c show
-        shell: pwsh
+    - name: Upload to Artifactory (Main or Release)
+      run: |
+        # zipname comes from build job output - keep same reference as your build
+        ZIPNAME="${{ needs.build_and_package.outputs.zipname }}"
+        echo "Uploading ${ZIPNAME} to Artifactory repo ${ArtifactoryRepoName}/${RepoName}/"
 
-      - name: Upload ReleasePackages zip to Artifactory (same format as your working yml)
-        env:
-          BUILD_NAME: "${{ env.PkgBase }}"
-          BUILD_NUMBER: "${{ github.run_number }}"
-          ARTIFACT_RELEASE_DIR: "${{ env.ArtifactReleaseDir }}"
-          ART_REPO_PATH: "${{ env.ArtifactoryRepoName }}"
-        run: |
-          $zip = "${{ needs.build_and_package.outputs.zipname }}"
-          $fullZipPath = Join-Path "${{ env.ArtifactReleaseDir }}" $zip
-          Write-Host "Preparing to upload: $fullZipPath"
-          jf rt upload "$fullZipPath" "${{ env.ArtifactoryRepoName }}/" --flat=true --build-name="$env:BUILD_NAME" --build-number="$env:BUILD_NUMBER" --server-id=artifactory-saas
-          # publish build info (same as your original)
-          jf rt bp "$env:BUILD_NAME" "$env:BUILD_NUMBER" --server-id=artifactory-saas
-          Write-Host "Upload complete. Build published: $env:BUILD_NAME / $env:BUILD_NUMBER"
-        shell: pwsh
+        # upload (same flags/format you used before)
+        jf rt upload "ReleasePackages/${ZIPNAME}" "${ArtifactoryRepoName}/${RepoName}/" --flat=true --build-name="${PkgBase}" --build-number="${{ github.run_number }}" --server-id=artifactory-saas
+
+        # optionally mark the build (same as your original)
+        jf rt bp "${PkgBase}" "${{ github.run_number }}" --server-id=artifactory-saas
