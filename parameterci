@@ -1,0 +1,130 @@
+name: Package selected ADF assets -> JFrog (parametrized)
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_basename:
+        description: 'Artifact base name (used to name ZIP). e.g. D365-CustomerCare-ADF'
+        required: true
+        default: 'adf-artifact'
+      pipeline_file:
+        description: 'Path in repo to pipeline file (relative). e.g. pipeline/CRM_Sync_ProcedureCode.json'
+        required: false
+        default: ''
+      dataset_file:
+        description: 'Path in repo to dataset file (relative). e.g. dataset/DS_SomeDataset.json'
+        required: false
+        default: ''
+      linkedservice_file:
+        description: 'Path in repo to linkedService file (relative). e.g. linkedService/LS_Sql.json'
+        required: false
+        default: ''
+      dataflow_file:
+        description: 'Path in repo to dataflow file (relative). e.g. dataflow/DF_Transform.json'
+        required: false
+        default: ''
+
+jobs:
+  build_and_package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show repo root (debug)
+        run: ls -la
+
+      - name: Prepare working folders
+        run: |
+          set -e
+          mkdir -p ReleasePackages
+          mkdir -p package_work/pipeline package_work/dataset package_work/linkedService package_work/dataflow
+
+      - name: Copy selected ADF assets into package folder
+        id: copy_assets
+        run: |
+          set -e
+
+          # helper function
+          copy_if_provided() {
+            SRC="$1"
+            DST_DIR="$2"
+            if [ -n "$SRC" ]; then
+              if [ -f "$SRC" ]; then
+                echo "Copying $SRC -> $DST_DIR/"
+                cp "$SRC" "$DST_DIR/"
+                echo "found=1" >> $GITHUB_OUTPUT
+              else
+                echo "File not found in repo: $SRC (skipping)"
+              fi
+            else
+              echo "No input provided for $DST_DIR (skipping)"
+            fi
+          }
+
+          # Inputs
+          echo "Inputs:"
+          echo " pipeline_file: ${{ github.event.inputs.pipeline_file }}"
+          echo " dataset_file: ${{ github.event.inputs.dataset_file }}"
+          echo " linkedservice_file: ${{ github.event.inputs.linkedservice_file }}"
+          echo " dataflow_file: ${{ github.event.inputs.dataflow_file }}"
+
+          # Copy files (paths are relative to repo root)
+          copy_if_provided "${{ github.event.inputs.pipeline_file }}" package_work/pipeline
+          copy_if_provided "${{ github.event.inputs.dataset_file }}" package_work/dataset
+          copy_if_provided "${{ github.event.inputs.linkedservice_file }}" package_work/linkedService
+          copy_if_provided "${{ github.event.inputs.dataflow_file }}" package_work/dataflow
+
+          # list created structure
+          echo "Package structure:"
+          ls -R package_work || true
+
+      - name: Create ZIP artifact
+        id: makezip
+        run: |
+          set -e
+          ARTNAME="${{ github.event.inputs.artifact_basename }}-${{ github.run_number }}.zip"
+          TARGET="ReleasePackages/${ARTNAME}"
+          echo "Creating ${TARGET} ..."
+          # include only folders that exist and are not empty
+          cd package_work
+          # if package_work is empty create an empty placeholder to avoid zip error
+          if [ -z "$(ls -A .)" ]; then
+            echo "No selected files found to package. Creating empty placeholder file." > placeholder.txt
+          fi
+          zip -r "../${TARGET}" . >/dev/null
+          cd ..
+          echo "artifact=${TARGET}" >> $GITHUB_OUTPUT
+          echo "ARTIFACT_PATH=${TARGET}"
+      - name: List ReleasePackages (debug)
+        run: ls -la ReleasePackages || true
+
+      # --- KEEP YOUR JFROG UPLOAD STEPS (do not change format) ---
+      # The lines below demonstrate typical steps - replace with your current working upload commands/secrets
+      - name: Setup JFrog CLI
+        uses: jfrog/setup-jfrog-cli@v4
+        with:
+          version: 'latest'
+        env:
+          # put your jfrog env/secrets here if you use them in your upload
+          JFROG_CLI_OIDC_TOKEN_REQUESTS_URL: ${{ secrets.JFROG_OIDC_URL || '' }}
+
+      - name: Configure JFrog CLI (example)
+        run: |
+          # Example - configure jfrog CLI with access token
+          # jfrog rt config add <server-id> --url="$JFROG_URL" --access-token="$JFROG_TOKEN" --interactive=false
+          echo "Configure jfrog CLI here (this step should match your existing workflow)"
+
+      - name: Upload artifact to Artifactory (do not modify if you have working steps)
+        run: |
+          # Use the same upload command that you already have and which is working.
+          # Example (replace with your working command):
+          ART="${{ steps.makezip.outputs.artifact }}"
+          echo "Uploading ${ART} to Artifactory (replace this with the real jfrog upload command)"
+          # jf rt u "${ART}" "my-repo/${ART}" --flat=true
+        env:
+          # Example secrets (keep your existing secrets)
+          JFROG_TOKEN: ${{ secrets.JFROG_SAAS_TOKEN }}
